@@ -2,6 +2,15 @@
 
 TypeScript & Three.js **WebGPU / TSL** runtime, progressive streaming loader, conformance verifier, and trainer for **VNM1 (Voivent Neural Material)** PBR materials.
 
+- **Live WebGPU Demo**: **[https://daw.voivent.com/lab/vnm/](https://daw.voivent.com/lab/vnm/)** (real-time Original PBR vs. VNM1 Direct GPU TSL comparison)
+- **Godot 4.7+ Port**: [`cdismus4/voivent-neural-material-godot`](https://github.com/cdismus4/voivent-neural-material-godot)
+
+![WebGPU Live Comparison — Marble 01 (standard, 1.26 MB vs 15.48 MB original PNGs)](./docs/preview-webgpu-marble.jpg)
+*Desktop WebGPU (`apple / metal-3`): Left = Original PBR PNGs (`15.48 MB`), Right = VNM1 Direct GPU TSL (`standard`, `1.26 MB` / `8.1% of PNG`). Material: Poly Haven `marble_01` (CC0-1.0).*
+
+![WebGPU Live Comparison — Coast Sand 03 (quality8, 10.01 MB vs 25.07 MB original PNGs)](./docs/preview-webgpu-sand.jpg)
+*Desktop WebGPU (`apple / metal-3`): Left = Original PBR PNGs (`25.07 MB`), Right = VNM1 Direct GPU TSL (`quality8` 8ch, `10.01 MB` / `39.9% of PNG`). Material: Poly Haven `coast_sand_03` (CC0-1.0).*
+
 ## Requirements
 
 > **Important — WebGPU Only:**  
