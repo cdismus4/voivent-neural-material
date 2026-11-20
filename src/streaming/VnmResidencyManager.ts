@@ -9,8 +9,10 @@
  * - Decouples mesh material unbinding from GPU buffer/texture disposal.
  */
 
-import type {
-  NeuralMaterialManifest,
+import {
+  getLatentChannelCount,
+  MLP_PROFILES,
+  type NeuralMaterialManifest,
 } from '../format/types';
 import type {
   MemoryBudgetConfig,
@@ -99,24 +101,31 @@ export class VnmResidencyManager {
 
     if (weights) {
       cpuBytes += weights.rawBytes?.byteLength ?? 0;
-      // Storage buffer size on GPU: 1,112 floats = 4,448 bytes
-      gpuBytes += weights.rawBytes?.byteLength ?? 4448;
+      const profileWeightsBytes = MLP_PROFILES[manifest.profile]
+        ? MLP_PROFILES[manifest.profile].totalWeights * 4
+        : 4448;
+      // Storage buffer size on GPU: totalWeights f32 = totalWeights * 4 bytes
+      gpuBytes += weights.rawBytes?.byteLength ?? profileWeightsBytes;
     }
     if (level0) {
       cpuBytes += level0.rawBytes?.byteLength ?? 0;
-      // Latent textures on GPU (Fine + Coarse RGBA u8)
+      // Latent textures on GPU: Fine + Coarse RGBA8 (1 texture/grid for 4ch, 2 textures/grid for 8ch)
+      const latentCh =
+        level0.fine?.channels ??
+        level0.coarse?.channels ??
+        (MLP_PROFILES[manifest.profile] ? getLatentChannelCount(manifest.profile) : 4);
       const fw = level0.fine?.width ?? 16;
       const fh = level0.fine?.height ?? 16;
       const cw = level0.coarse?.width ?? 8;
       const ch = level0.coarse?.height ?? 8;
-      gpuBytes += fw * fh * 4 + cw * ch * 4;
+      gpuBytes += (fw * fh + cw * ch) * latentCh;
     }
     if (tail) {
       cpuBytes += tail.rawBytes?.byteLength ?? 0;
-      // Tail preview texture on GPU (16x16x8 or 2 RGBA textures)
+      // Tail preview on GPU allocates 3 RGBA8 DataTextures (baseColor, normal, ORM) = 12 bytes/texel
       const tw = tail.tail?.tailWidth ?? 16;
       const th = tail.tail?.tailHeight ?? 16;
-      gpuBytes += tw * th * 8;
+      gpuBytes += tw * th * 12;
     }
 
     const state: ResidencyState = tier === 'fallback' ? 'unloaded' : 'resident';

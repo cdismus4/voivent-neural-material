@@ -82,6 +82,30 @@ describe('Ticket D1-B: VnmStreamingSession & VnmResidencyManager', () => {
       // Active Mat A MUST NOT be evicted!
       expect(manager.getAsset('mat-A')).toBeDefined();
     });
+
+    it('F-6: accurately estimates GPU bytes for 8ch latent pairs and 3-texture tail previews', async () => {
+      const { pkg, manifest } = await createTestPackage('gpu-bytes-mat');
+      const manager = new VnmResidencyManager();
+
+      const tail = parseTailChunk(pkg.tailChunk.data);
+      const tailAsset = manager.registerAssetTier(manifest, 'tail', {
+        tail: { tail, rawBytes: pkg.tailChunk.data },
+      }, 1);
+      // Tail preview creates 3 RGBA8 DataTextures (baseColor, normal, ORM) = 12 bytes/texel
+      expect(tailAsset.gpuByteSize).toBe(tail.tailWidth * tail.tailHeight * 12);
+
+      const manifest8: NeuralMaterialManifest = { ...manifest, assetId: 'gpu-bytes-8ch', profile: 'standard8' };
+      const asset8 = manager.registerAssetTier(manifest8, 'level0', {
+        weights: { weights: {} as any, rawBytes: new Uint8Array(1304 * 4 + 16) },
+        level0: {
+          fine: { width: 32, height: 16, channels: 8, data: new Uint8Array(32 * 16 * 8), isNormalizedU8: true },
+          coarse: { width: 16, height: 8, channels: 8, data: new Uint8Array(16 * 8 * 8), isNormalizedU8: true },
+          rawBytes: new Uint8Array(100),
+        },
+      }, 2);
+      const expectedGpuBytes = (1304 * 4 + 16) + (32 * 16 + 16 * 8) * 8;
+      expect(asset8.gpuByteSize).toBe(expectedGpuBytes);
+    });
   });
 
   describe('VnmStreamingSession', () => {
@@ -115,6 +139,8 @@ describe('Ticket D1-B: VnmStreamingSession & VnmResidencyManager', () => {
 
       expect(session.getTier()).toBe('level0');
       expect(session.getState()).toBe('active');
+      // F-2 regression: tail -> level0 upgrade must not double-retain
+      expect(residency.getAsset('phased-mat')?.referenceCount).toBe(1);
 
       // Verified phased progression sequence
       const tiersVisited = tierTransitions.map((t) => t.tier);
@@ -123,6 +149,61 @@ describe('Ticket D1-B: VnmStreamingSession & VnmResidencyManager', () => {
 
       session.dispose();
       expect(session.getState()).toBe('unloaded');
+      expect(residency.getAsset('phased-mat')?.referenceCount).toBe(0);
+      expect(residency.getAsset('phased-mat')?.state).toBe('resident');
+    });
+
+    it('F-2: keeps reference counts balanced across switch + tail->level0 promotion and allows eviction after dispose', async () => {
+      const matA = await createTestPackage('mat-switch-A');
+      const matB = await createTestPackage('mat-switch-B');
+      const matC = await createTestPackage('mat-switch-C');
+
+      const mockStore = new Map<string, Uint8Array>([
+        [matA.manifest.weights.url, matA.pkg.weightsChunk.data],
+        [matA.manifest.levels[0]!.chunk.url, matA.pkg.level0Chunk.data],
+        [matA.manifest.tail.url, matA.pkg.tailChunk.data],
+        [matB.manifest.weights.url, matB.pkg.weightsChunk.data],
+        [matB.manifest.levels[0]!.chunk.url, matB.pkg.level0Chunk.data],
+        [matB.manifest.tail.url, matB.pkg.tailChunk.data],
+        [matC.manifest.weights.url, matC.pkg.weightsChunk.data],
+        [matC.manifest.levels[0]!.chunk.url, matC.pkg.level0Chunk.data],
+        [matC.manifest.tail.url, matC.pkg.tailChunk.data],
+      ]);
+
+      const loader = new VnmChunkLoader({
+        fetchFn: async (url) => mockStore.get(url)!,
+        cacheGet: async () => null,
+      });
+
+      const singleAssetCpu = matB.pkg.weightsChunk.byteLength + matB.pkg.level0Chunk.byteLength + matB.pkg.tailChunk.byteLength;
+      const residency = new VnmResidencyManager({
+        maxCpuBytes: Math.floor(singleAssetCpu * 2.5),
+        maxGpuBytes: 10 * 1024 * 1024,
+      });
+
+      const externalSession = new VnmStreamingSession(loader, residency);
+      await externalSession.loadMaterial(matA.manifest);
+      expect(residency.getAsset('mat-switch-A')?.referenceCount).toBe(1);
+
+      const session = new VnmStreamingSession(loader, residency);
+      await session.loadMaterial(matA.manifest);
+      expect(residency.getAsset('mat-switch-A')?.referenceCount).toBe(2);
+
+      // Switch to mat-switch-B (tail -> level0): must release mat-switch-A ONCE (leaving externalSession's retain=1)
+      await session.loadMaterial(matB.manifest);
+      expect(residency.getAsset('mat-switch-A')?.referenceCount).toBe(1);
+      expect(residency.getAsset('mat-switch-B')?.referenceCount).toBe(1);
+
+      session.dispose();
+      expect(residency.getAsset('mat-switch-B')?.referenceCount).toBe(0);
+
+      // Loading mat-switch-C with another session under tight budget must now evict mat-switch-B cleanly while keeping active mat-switch-A
+      const session2 = new VnmStreamingSession(loader, residency);
+      await session2.loadMaterial(matC.manifest);
+      expect(residency.getAsset('mat-switch-A')).toBeDefined();
+      expect(residency.getAsset('mat-switch-B')).toBeUndefined();
+      session2.dispose();
+      externalSession.dispose();
     });
 
     it('preserves current active material during switch and cancels stale async results using generations', async () => {

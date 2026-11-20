@@ -192,4 +192,34 @@ describe('Ticket D1-A: VnmChunkLoader', () => {
     // Only 1 underlying network fetch occurred
     expect(fetchCalls).toBe(1);
   });
+
+  it('F-4: rejects chunk when SHA-256 verification is unavailable (e.g. non-secure context without crypto.subtle)', async () => {
+    const { pkg, manifest } = await createTestPackage();
+    const loader = new VnmChunkLoader({
+      fetchFn: async () => pkg.weightsChunk.data,
+      cacheGet: async () => pkg.weightsChunk.data,
+      cacheDelete: async () => true,
+    });
+
+    vi.stubGlobal('crypto', {});
+    try {
+      await expect(loader.loadWeights(manifest)).rejects.toThrow(/validation failed/i);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('M-4: rejects tail chunk when subheader tailFirstMip mismatches manifest.tailFirstMip', async () => {
+    const { pkg, manifest } = await createTestPackage();
+    const mismatchedManifest: NeuralMaterialManifest = {
+      ...manifest,
+      tailFirstMip: manifest.tailFirstMip + 1,
+    };
+    const loader = new VnmChunkLoader({
+      fetchFn: async () => pkg.tailChunk.data,
+      cacheGet: async () => null,
+    });
+
+    await expect(loader.loadTail(mismatchedManifest)).rejects.toThrow(/Tail first mip mismatch/);
+  });
 });

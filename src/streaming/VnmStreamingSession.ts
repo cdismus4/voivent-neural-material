@@ -81,7 +81,6 @@ export class VnmStreamingSession {
     this.abortController = new AbortController();
     const signal = this.abortController.signal;
 
-    const previousAssetId = this.currentAssetId;
     const targetAssetId = manifest.assetId;
 
     this.currentState = 'requested';
@@ -90,7 +89,7 @@ export class VnmStreamingSession {
     // 2. Check if target asset is already fully resident in residency manager
     const existing = this.residency.getAsset(targetAssetId);
     if (existing && existing.tier === 'level0' && existing.weights && existing.level0) {
-      this.activateNewAsset(targetAssetId, previousAssetId, 'level0', activeGen);
+      this.activateNewAsset(targetAssetId, 'level0', activeGen);
       return;
     }
 
@@ -105,9 +104,9 @@ export class VnmStreamingSession {
             { tail: tailPayload },
             activeGen,
           );
-          // If we are still on fallback, promote to tail preview immediately
-          if (this.currentTier === 'fallback' || previousAssetId !== targetAssetId) {
-            this.activateNewAsset(targetAssetId, previousAssetId, 'tail', activeGen);
+          // If we are still on fallback or switching to another asset, promote to tail preview immediately
+          if (this.currentTier === 'fallback' || this.currentAssetId !== targetAssetId) {
+            this.activateNewAsset(targetAssetId, 'tail', activeGen);
           }
         }
       } catch (err) {
@@ -135,8 +134,8 @@ export class VnmStreamingSession {
         activeGen,
       );
 
-      // 5. Activate Level 0 and release dual-residency on previous asset
-      this.activateNewAsset(targetAssetId, previousAssetId, 'level0', activeGen);
+      // 5. Activate Level 0 and release dual-residency on previous asset (without double-retaining target)
+      this.activateNewAsset(targetAssetId, 'level0', activeGen);
     } catch (err) {
       if (this.generation === activeGen && !this.isDisposed) {
         if (!signal.aborted) {
@@ -149,22 +148,22 @@ export class VnmStreamingSession {
   }
 
   /**
-   * Safely activates the new asset tier, updating reference counts and release previous asset.
+   * Safely activates the new asset tier, updating reference counts and releasing any different prior asset.
    */
   private activateNewAsset(
     newAssetId: string,
-    previousAssetId: string | null,
     newTier: StreamingTier,
     targetGen: number,
   ): void {
     if (this.generation !== targetGen || this.isDisposed) return;
 
-    // Retain new asset
-    this.residency.retain(newAssetId);
-
-    // If switching from a different asset, release the previous asset
-    if (previousAssetId && previousAssetId !== newAssetId) {
-      this.residency.release(previousAssetId);
+    const priorActiveAssetId = this.currentAssetId;
+    if (priorActiveAssetId !== newAssetId) {
+      // Retain newly activated asset only when not already retained by this session (e.g. tail -> level0 upgrade)
+      this.residency.retain(newAssetId);
+      if (priorActiveAssetId) {
+        this.residency.release(priorActiveAssetId);
+      }
     }
 
     this.currentAssetId = newAssetId;

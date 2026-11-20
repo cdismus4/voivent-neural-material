@@ -146,6 +146,11 @@ export class VnmChunkLoader {
     );
 
     const tail = parseTailChunk(raw);
+    if (tail.tailFirstMip !== manifest.tailFirstMip) {
+      throw new Error(
+        `Tail first mip mismatch with manifest: expected ${manifest.tailFirstMip}, got ${tail.tailFirstMip}`,
+      );
+    }
     return { tail, rawBytes: raw };
   }
 
@@ -295,9 +300,9 @@ export class VnmChunkLoader {
       return false;
     }
 
-    // 2. Cryptographic SHA-256 check
+    // 2. Cryptographic SHA-256 check (SPEC §3 requires verification before use; reject 'mismatch' and 'unavailable')
     const status = await verifyChunkSha256Status(data, ref.sha256);
-    if (status === 'mismatch') {
+    if (status !== 'match') {
       return false;
     }
 

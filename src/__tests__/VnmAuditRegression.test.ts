@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { MeshStandardNodeMaterial, NearestFilter, StorageBufferAttribute } from 'three/webgpu';
 import { uv } from 'three/tsl';
 import type { LatentFeatureGrid, MlpWeights } from '../format/types';
+import { parseManifest } from '../format/types';
 import { serializeLatentsChunk, writeVnmHeader, VnmChunkKind } from '../format/binary';
 import { attachNeuralPbrNodes, createLatentDataTexture, createNeuralMaterialTslNodes, createWeightsStorageBuffer } from '../gpu/TslMlpDecoderNode';
 
@@ -71,5 +72,58 @@ describe('VNM audit boundary regressions', () => {
             expect(material.aoNode).toBe(nodes.ao);
             next.dispose();
         } finally { texture.dispose(); material.dispose(); }
+    });
+
+    it('F-3 & M-5: rejects invalid manifest levels ordering/emptiness and unsupported quantization/precisions', () => {
+        const base = {
+            format: 'VNM1',
+            version: 1,
+            assetId: 'manifest-gate-test',
+            sourceSize: [512, 512],
+            profile: 'standard',
+            quantization: 'u8',
+            weightStoragePrecision: 'f32',
+            computePrecision: 'f32',
+            channels: 'base3-normal2-rough-metal-ao',
+            baseColorSpace: 'linear-srgb',
+            normalConvention: 'tangent-positive-y-positive-z',
+            wrapU: 'repeat',
+            wrapV: 'repeat',
+            weights: { url: 'weights.bin', sha256: '0'.repeat(64), byteLength: 4464 },
+            levels: [
+                {
+                    sourceMip: 0,
+                    sourceSize: [512, 512],
+                    fineSize: [32, 32],
+                    coarseSize: [16, 16],
+                    chunk: { url: 'level-0.bin', sha256: '1'.repeat(64), byteLength: 5152 },
+                },
+            ],
+            tailFirstMip: 5,
+            tail: { url: 'tail.bin', sha256: '2'.repeat(64), byteLength: 2080 },
+        };
+
+        expect(parseManifest(base).levels).toHaveLength(1);
+        expect(() => parseManifest({ ...base, levels: [] })).toThrow(/non-empty/i);
+        expect(() => parseManifest({ ...base, levels: [{ ...base.levels[0], sourceMip: 1 }] })).toThrow(/sourceMip must equal 0/i);
+        expect(() => parseManifest({
+            ...base,
+            levels: [
+                base.levels[0],
+                { ...base.levels[0], sourceMip: 0 },
+            ],
+        })).toThrow(/ascending sourceMip/i);
+        expect(() => parseManifest({
+            ...base,
+            levels: [
+                base.levels[0],
+                { ...base.levels[0], sourceMip: 2 },
+                { ...base.levels[0], sourceMip: 1 },
+            ],
+        })).toThrow(/ascending sourceMip/i);
+
+        expect(() => parseManifest({ ...base, quantization: 'u4' })).toThrow(/Unsupported quantization/i);
+        expect(() => parseManifest({ ...base, weightStoragePrecision: 'f16' })).toThrow(/Unsupported weightStoragePrecision/i);
+        expect(() => parseManifest({ ...base, computePrecision: 'f16' })).toThrow(/Unsupported computePrecision/i);
     });
 });

@@ -204,23 +204,37 @@ export function createTailPreviewTextures(asset: ResidentNeuralAsset): TailPrevi
     const wrapU = asset.manifest?.wrapU ?? 'repeat';
     const wrapV = asset.manifest?.wrapV ?? 'repeat';
 
-    const baseColorTexture = configurePreviewDataTexture(baseData, width, height, wrapU, wrapV);
-    const normalTexture = configurePreviewDataTexture(normalData, width, height, wrapU, wrapV);
-    const ormTexture = configurePreviewDataTexture(ormData, width, height, wrapU, wrapV);
+    let baseColorTexture: DataTexture | null = null;
+    let normalTexture: DataTexture | null = null;
+    let ormTexture: DataTexture | null = null;
+    try {
+        baseColorTexture = configurePreviewDataTexture(baseData, width, height, wrapU, wrapV);
+        normalTexture = configurePreviewDataTexture(normalData, width, height, wrapU, wrapV);
+        ormTexture = configurePreviewDataTexture(ormData, width, height, wrapU, wrapV);
+    } catch (err) {
+        baseColorTexture?.dispose();
+        normalTexture?.dispose();
+        ormTexture?.dispose();
+        throw err;
+    }
+
+    const finalBase = baseColorTexture;
+    const finalNormal = normalTexture;
+    const finalOrm = ormTexture;
 
     let disposed = false;
     return {
-        baseColorTexture,
-        normalTexture,
-        ormTexture,
+        baseColorTexture: finalBase,
+        normalTexture: finalNormal,
+        ormTexture: finalOrm,
         width,
         height,
         dispose() {
             if (disposed) return;
             disposed = true;
-            baseColorTexture.dispose();
-            normalTexture.dispose();
-            ormTexture.dispose();
+            finalBase.dispose();
+            finalNormal.dispose();
+            finalOrm.dispose();
         },
     };
 }
@@ -341,37 +355,46 @@ export function bindResidentAssetToMeshes(
 
         const wrapU = asset.manifest.wrapU ?? 'repeat';
         const wrapV = asset.manifest.wrapV ?? 'repeat';
-        const fineSource = createLatentTextureSource(asset.level0.fine, asset.manifest.profile, wrapU, wrapV);
-        const coarseSource = createLatentTextureSource(asset.level0.coarse, asset.manifest.profile, wrapU, wrapV);
-        const weightsBuffer = createWeightsStorageBuffer(asset.weights.weights);
-        const normMipNode = resolveNormalizedMipNode(asset, uvNode, options);
+        const allocatedTextures: Texture[] = [];
+        try {
+            const fineSource = createLatentTextureSource(asset.level0.fine, asset.manifest.profile, wrapU, wrapV);
+            allocatedTextures.push(...toTextureArray(fineSource));
+            const coarseSource = createLatentTextureSource(asset.level0.coarse, asset.manifest.profile, wrapU, wrapV);
+            allocatedTextures.push(...toTextureArray(coarseSource));
+            const weightsBuffer = createWeightsStorageBuffer(asset.weights.weights);
+            const normMipNode = resolveNormalizedMipNode(asset, uvNode, options);
 
-        const nodes: NeuralPbrNodes = createNeuralMaterialTslNodes(
-            fineSource,
-            coarseSource,
-            weightsBuffer,
-            { uv: uvNode, normalizedMip: normMipNode },
-            {
-                profile: asset.manifest.profile,
-                fineSize: level0Meta.fineSize,
-                coarseSize: level0Meta.coarseSize,
-                wrapU,
-                wrapV,
-            },
-        );
+            const nodes: NeuralPbrNodes = createNeuralMaterialTslNodes(
+                fineSource,
+                coarseSource,
+                weightsBuffer,
+                { uv: uvNode, normalizedMip: normMipNode },
+                {
+                    profile: asset.manifest.profile,
+                    fineSize: level0Meta.fineSize,
+                    coarseSize: level0Meta.coarseSize,
+                    wrapU,
+                    wrapV,
+                },
+            );
 
-        const textures = [...toTextureArray(fineSource), ...toTextureArray(coarseSource)];
-        tier = 'level0';
-        textureSize = {
-            width: asset.manifest.sourceSize[0],
-            height: asset.manifest.sourceSize[1],
-        };
-        buildNodeBindingForSlot = (nodeMat) => attachNeuralPbrNodes(nodeMat, nodes);
-        disposeSharedResources = () => {
-            for (const tex of textures) {
+            tier = 'level0';
+            textureSize = {
+                width: asset.manifest.sourceSize[0],
+                height: asset.manifest.sourceSize[1],
+            };
+            buildNodeBindingForSlot = (nodeMat) => attachNeuralPbrNodes(nodeMat, nodes);
+            disposeSharedResources = () => {
+                for (const tex of allocatedTextures) {
+                    tex.dispose();
+                }
+            };
+        } catch (err) {
+            for (const tex of allocatedTextures) {
                 tex.dispose();
             }
-        };
+            throw err;
+        }
     } else if (asset.tail) {
         const tailTextures = createTailPreviewTextures(asset);
         if (!tailTextures) return null;
@@ -386,60 +409,92 @@ export function bindResidentAssetToMeshes(
         return null;
     }
 
-    const batch = createRefCountedResourceBatch(disposeSharedResources);
+    let sharedDisposed = false;
+    const disposeSharedOnce = () => {
+        if (sharedDisposed) return;
+        sharedDisposed = true;
+        disposeSharedResources();
+    };
+
+    const batch = createRefCountedResourceBatch(disposeSharedOnce);
     const meshHandles: Array<() => void> = [];
 
-    for (const mesh of meshes) {
-        const previousRecord = activeMeshBindings.get(mesh);
-        const originalMaterial = previousRecord ? previousRecord.originalMaterial : mesh.material;
+    try {
+        for (const mesh of meshes) {
+            const previousRecord = activeMeshBindings.get(mesh);
+            const originalMaterial = previousRecord ? previousRecord.originalMaterial : mesh.material;
 
-        // Dispose any prior VNM binding and GPU textures attached to this mesh before replacing.
-        if (previousRecord) {
-            previousRecord.release();
-            activeMeshBindings.delete(mesh);
-        }
+            const slotCleanup: Array<() => void> = [];
+            const convertSlot = (srcMat: THREE.Material): MeshStandardNodeMaterial => {
+                const nodeMat = createNodeMaterialFromSource(srcMat);
+                try {
+                    const binding = buildNodeBindingForSlot(nodeMat);
+                    slotCleanup.push(() => {
+                        binding.dispose();
+                        nodeMat.dispose();
+                    });
+                    return nodeMat;
+                } catch (err) {
+                    nodeMat.dispose();
+                    throw err;
+                }
+            };
 
-        const slotCleanup: Array<() => void> = [];
-        batch.retain();
-
-        const convertSlot = (srcMat: THREE.Material): MeshStandardNodeMaterial => {
-            const nodeMat = createNodeMaterialFromSource(srcMat);
-            const binding = buildNodeBindingForSlot(nodeMat);
-            slotCleanup.push(() => {
-                binding.dispose();
-                nodeMat.dispose();
-            });
-            return nodeMat;
-        };
-
-        if (Array.isArray(originalMaterial)) {
-            mesh.material = originalMaterial.map((slot) => (slot ? convertSlot(slot) : slot));
-        } else if (originalMaterial) {
-            mesh.material = convertSlot(originalMaterial);
-        }
-
-        let released = false;
-        const releaseMeshBinding = () => {
-            if (released) return;
-            released = true;
-            for (const cleanup of slotCleanup) {
-                cleanup();
+            let nextMaterial: THREE.Material | THREE.Material[];
+            try {
+                if (Array.isArray(originalMaterial)) {
+                    nextMaterial = originalMaterial.map((slot) => (slot ? convertSlot(slot) : slot));
+                } else if (originalMaterial) {
+                    nextMaterial = convertSlot(originalMaterial);
+                } else {
+                    nextMaterial = originalMaterial;
+                }
+            } catch (err) {
+                for (const cleanup of slotCleanup) {
+                    cleanup();
+                }
+                throw err;
             }
-            batch.release();
-        };
 
-        activeMeshBindings.set(mesh, {
-            originalMaterial,
-            release: releaseMeshBinding,
-        });
-
-        meshHandles.push(() => {
-            if (activeMeshBindings.get(mesh)?.originalMaterial === originalMaterial) {
-                mesh.material = originalMaterial;
+            // Dispose any prior VNM binding and GPU textures attached to this mesh only after new slots succeed.
+            if (previousRecord) {
+                previousRecord.release();
                 activeMeshBindings.delete(mesh);
             }
-            releaseMeshBinding();
-        });
+
+            mesh.material = nextMaterial;
+            batch.retain();
+
+            let released = false;
+            const releaseMeshBinding = () => {
+                if (released) return;
+                released = true;
+                for (const cleanup of slotCleanup) {
+                    cleanup();
+                }
+                batch.release();
+            };
+
+            const record: MeshBindingRecord = {
+                originalMaterial,
+                release: releaseMeshBinding,
+            };
+            activeMeshBindings.set(mesh, record);
+
+            meshHandles.push(() => {
+                if (activeMeshBindings.get(mesh) === record) {
+                    mesh.material = originalMaterial;
+                    activeMeshBindings.delete(mesh);
+                }
+                releaseMeshBinding();
+            });
+        }
+    } catch (err) {
+        for (const releaseHandle of meshHandles) {
+            releaseHandle();
+        }
+        disposeSharedOnce();
+        throw err;
     }
 
     return {

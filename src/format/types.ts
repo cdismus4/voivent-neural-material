@@ -3,6 +3,8 @@
  * Clean-room neural texture compression and procedural PBR representation.
  */
 
+import { validateManifestLevels } from './validation';
+
 export type DecoderProfile = 'small' | 'standard' | 'quality' | 'standard8' | 'quality8';
 export type Quantization = 'u8' | 'u4';
 export type DecodeMode = 'direct' | 'cached' | 'tail';
@@ -205,14 +207,14 @@ export function parseManifest(input: unknown): NeuralMaterialManifest {
     if (m.profile !== 'small' && m.profile !== 'standard' && m.profile !== 'quality' && m.profile !== 'standard8' && m.profile !== 'quality8') {
         throw new Error(`Invalid profile: '${String(m.profile)}'`);
     }
-    if (m.quantization !== 'u8' && m.quantization !== 'u4') {
-        throw new Error(`Invalid quantization: '${String(m.quantization)}'`);
+    if (m.quantization !== 'u8') {
+        throw new Error(`Unsupported quantization: '${String(m.quantization)}': only 'u8' is supported`);
     }
-    if (m.weightStoragePrecision !== 'f32' && m.weightStoragePrecision !== 'f16') {
-        throw new Error(`Invalid weightStoragePrecision: '${String(m.weightStoragePrecision)}'`);
+    if (m.weightStoragePrecision !== 'f32') {
+        throw new Error(`Unsupported weightStoragePrecision: '${String(m.weightStoragePrecision)}': only 'f32' is supported`);
     }
-    if (m.computePrecision !== 'f32' && m.computePrecision !== 'f16') {
-        throw new Error(`Invalid computePrecision: '${String(m.computePrecision)}'`);
+    if (m.computePrecision !== 'f32') {
+        throw new Error(`Unsupported computePrecision: '${String(m.computePrecision)}': only 'f32' is supported`);
     }
     if (m.channels !== 'base3-normal2-rough-metal-ao') {
         throw new Error(`Unsupported channels convention: '${String(m.channels)}'`);
@@ -246,8 +248,8 @@ export function parseManifest(input: unknown): NeuralMaterialManifest {
     const weights = validateChunkRef(m.weights, 'weights');
     const tail = validateChunkRef(m.tail, 'tail');
 
-    if (!Array.isArray(m.levels)) {
-        throw new Error('Manifest levels must be an array');
+    if (!Array.isArray(m.levels) || m.levels.length === 0) {
+        throw new Error('Manifest levels must be a non-empty array');
     }
 
     const validateDim = (arr: unknown, name: string): [number, number] => {
@@ -292,6 +294,8 @@ export function parseManifest(input: unknown): NeuralMaterialManifest {
             chunk,
         };
     });
+
+    validateManifestLevels(levels);
 
     if (typeof m.tailFirstMip !== 'number' || !Number.isSafeInteger(m.tailFirstMip) || m.tailFirstMip < 0) {
         throw new Error(`Invalid tailFirstMip: '${String(m.tailFirstMip)}': must be a non-negative integer`);

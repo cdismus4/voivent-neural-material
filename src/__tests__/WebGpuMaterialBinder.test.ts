@@ -136,8 +136,46 @@ describe('WebGpuMaterialBinder Standalone Suite', () => {
         expect(level0Handle?.tier).toBe('level0');
         expect(tailDisposeSpy).toHaveBeenCalledTimes(1);
 
+        // F-1 regression: disposing an older batch handle must NOT detach or leak the active newer binding
+        const level0MatUnknown: unknown = mesh.material;
+        expect(level0MatUnknown).toBeInstanceOf(MeshStandardNodeMaterial);
+        const level0DisposeSpy = vi.spyOn(level0MatUnknown as MeshStandardNodeMaterial, 'dispose');
+        tailHandle!.dispose();
+        expect(mesh.material).toBe(level0MatUnknown);
+        expect(level0DisposeSpy).not.toHaveBeenCalled();
+
         expect(unbindResidentAssetFromMeshes([mesh])).toBe(1);
+        expect(level0DisposeSpy).toHaveBeenCalledTimes(1);
         expect(mesh.material).toBe(origMat);
+    });
+
+    it('F-1/M-1: cleans up allocated GPU textures and partial bindings when binding throws midway', () => {
+        const origMat = new THREE.MeshStandardMaterial({ color: 0x444444 });
+        const mesh1 = new THREE.Mesh(new THREE.BoxGeometry(1, 1, 1), origMat);
+        const poisonMat = new THREE.MeshStandardMaterial();
+        Object.defineProperty(poisonMat, 'name', {
+            get() {
+                throw new Error('simulated slot conversion error');
+            },
+        });
+        const mesh2 = new THREE.Mesh(new THREE.BoxGeometry(1, 1, 1), poisonMat);
+
+        const texDisposeSpy = vi.spyOn(THREE.DataTexture.prototype, 'dispose');
+        try {
+            // Throw after fine/coarse latent textures are allocated (invalid normalizedMip)
+            expect(() => bindResidentAssetToMeshes([mesh1], makeLevel0Asset('quality8'), { normalizedMip: -1 })).toThrow(/normalizedMip/);
+            expect(texDisposeSpy).toHaveBeenCalledTimes(4); // quality8 allocates 2 fine + 2 coarse DataTextures
+            expect(mesh1.material).toBe(origMat);
+
+            texDisposeSpy.mockClear();
+            // Throw mid-mesh-loop on mesh2: mesh1 and all shared DataTextures must roll back cleanly
+            expect(() => bindResidentAssetToMeshes([mesh1, mesh2], makeLevel0Asset('standard'))).toThrow(/simulated slot conversion error/);
+            expect(texDisposeSpy).toHaveBeenCalledTimes(2); // standard allocates 1 fine + 1 coarse DataTexture
+            expect(mesh1.material).toBe(origMat);
+            expect(unbindResidentAssetFromMeshes([mesh1, mesh2])).toBe(0);
+        } finally {
+            texDisposeSpy.mockRestore();
+        }
     });
 
     it('supports Option C mipMax resolution and UV-derivative normalizedMip TSL node', () => {
