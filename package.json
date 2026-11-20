@@ -1,0 +1,48 @@
+{
+  "name": "voivent-neural-material",
+  "version": "1.0.0",
+  "description": "Voivent Neural Material (VNM1) TypeScript & Three.js WebGPU / TSL runtime, streaming loader, conformance verifier, and trainer",
+  "license": "Apache-2.0",
+  "type": "module",
+  "sideEffects": false,
+  "main": "./dist/index.js",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./spec": "./docs/SPEC.md"
+  },
+  "files": [
+    "dist",
+    "docs",
+    "LICENSE",
+    "README.md"
+  ],
+  "keywords": [
+    "neural-material",
+    "pbr",
+    "webgpu",
+    "threejs",
+    "tsl",
+    "texture-compression",
+    "vnm1"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "peerDependencies": {
+    "three": ">=0.185.0 <1.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24.3.0",
+    "@types/three": "^0.185.4",
+    "three": "^0.185.1",
+    "typescript": "^5.9.2",
+    "vitest": "^4.1.11"
+  }
+}
