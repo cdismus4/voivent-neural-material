@@ -80,6 +80,12 @@ npm run build
 
 Includes the 286-case golden vector conformance suites across `standard`, `quality`, `standard8`, and `quality8` in [`src/__tests__/`](./src/__tests__/).
 
+## Known Limitations (VNM1 v1)
+
+- **No intermediate mipmaps / anisotropic filtering in v1**: VNM1 v1 assets train and evaluate mip 0 (`level-0.bin`) plus a coarse `16x16` `tail.bin` fallback without mip 1..6 levels. High-frequency periodic patterns (such as woven fabrics like Denim or fine gravel) will exhibit spatial minification moire when viewed at a distance compared to hardware-mipmapped PBR textures.
+- **No alpha cutout, emissive, or height channels**: Standard V1 outputs 8 PBR channels (`baseColor` RGB, tangent `normal` XY, `roughness`, `metalness`, `ao`).
+- See [`docs/CAPABILITY.md`](./docs/CAPABILITY.md) for measured corpus bounds (`30/29` pass rate, 4K grid-resolution wall, and desktop/mobile GPU timings).
+
 ## License
 
 Licensed under the [Apache License, Version 2.0](./LICENSE).
