@@ -6,9 +6,9 @@
 import { validateManifestLevels } from './validation';
 
 export type DecoderProfile = 'small' | 'standard' | 'quality' | 'standard8' | 'quality8';
-export type Quantization = 'u8' | 'u4';
+export type Quantization = 'u8';
 export type DecodeMode = 'direct' | 'cached' | 'tail';
-export type Precision = 'f32' | 'f16';
+export type Precision = 'f32';
 
 export interface ChunkRef {
     readonly url: string;
