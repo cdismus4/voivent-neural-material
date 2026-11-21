@@ -147,13 +147,13 @@ Forward Mobile（mobile）：ベースラインの GPU 時間は占有率 25%／
     - `standard8 (fabric030)`: `gpu_ms` `7.14 / 8.21 / 9.59 ms`（`Δ +6.27 / +7.08 / +8.05 ms`、`frame_ms` `16.71 / 16.63 / 16.67 ms`, 100% 目安 `+14.0 ms` 以下を達成、旧 `29.79 ms` から大幅短縮）
     - `quality8 (sand)`: `gpu_ms` `7.70 / 8.14 / 12.39 ms`（`Δ +6.82 / +7.01 / +10.85 ms`、`frame_ms` `16.68 / 16.62 / 16.67 ms`, 100% 目安 `+30.0 ms` 以下を達成、旧 `72.21 ms` から約 5.8 倍短縮）
     - 初回コンパイル（キャッシュ無し新規起動 `cov=25%`）: `marble 770.49 / cloth 683.81 / fabric030 723.51 / sand 690.58 ms`（旧 `weights_tex` 初回 `marble 857.72 ms` と同オーダー）。
-  - **Compatibility（OpenGL ES 3.2）**（旧 `weights_tex` 経路での実測。Android GLES 3.2 ドライバ制約により `gpu_ms = 0.0000` 固定のため `frame_ms` 比較、ベースライン `16.54 / 16.63 / 16.61 ms`）:
-    - `standard (marble)`: `frame_ms` `16.63 / 16.65 / 26.63 ms`（`100% Δ +10.02 ms`、約 37.5 FPS）
-    - `quality (cloth)`: `frame_ms` `16.63 / 16.62 / 21.80 ms`（`100% Δ +5.19 ms`、約 45.9 FPS）
-    - `standard8 (fabric030)`: `frame_ms` `16.60 / 25.96 / 48.51 ms`（`50% Δ +9.33 ms`, `100% Δ +31.90 ms`）
-    - `quality8 (sand)`: `frame_ms` `23.16 / 43.52 / 85.31 ms`（`100% Δ +68.70 ms`、約 11.7 FPS）
-    - 初回コンパイル（`cov=25%`）: `5.87〜35.19 ms`（Vulkan 初回ほど大きなスパイクなし）。
-  - モバイル実機所見：Vulkan (`Forward Mobile`) では重み配列 UBO 化により Pixel 9a 全面 100% でも 4プロファイルすべて 60 FPS（`16.65〜16.67 ms`）で動作することを確認（`quality` 100% の `Δgpu +9.95 ms` のみ目標 `+8.0 ms` を `+1.95 ms` 超過）。なお `Compatibility`（GLES 3.2）上での `uniform vec4 weights[498]` 動作・性能は別途検証残件。
+  - **Compatibility（OpenGL ES 3.2）**（重み UBO 配列 `uniform vec4 weights[N]` 採用版実測。`quality8 = 498 vec4` 含め UBO 制限・シェーダコンパイルエラーなし、`center_pixel_ok=true`。GLES 3.2 制約により `gpu_ms = 0.0000` 固定のため `frame_ms` 比較、ベースライン `16.57 / 16.61 / 16.63 ms`。旧 `weights_tex` 時 21.80〜85.31 ms から大幅高速化し全面 60 FPS 到達）:
+    - `standard (marble)`: `frame_ms` `16.63 / 16.66 / 16.62 ms`（`Δ +0.06 / +0.04 / -0.01 ms`, 60 FPS）
+    - `quality (cloth)`: `frame_ms` `16.63 / 16.62 / 16.64 ms`（`Δ +0.06 / +0.01 / +0.00 ms`, 60 FPS）
+    - `standard8 (fabric030)`: `frame_ms` `16.62 / 16.61 / 16.66 ms`（`Δ +0.05 / +0.00 / +0.03 ms`, 60 FPS）
+    - `quality8 (sand)`: `frame_ms` `16.65 / 16.63 / 16.64 ms`（`Δ +0.07 / +0.02 / +0.01 ms`, 60 FPS。旧 `weights_tex` 時 `85.31 ms` から大幅短縮）
+    - 初回コンパイル（キャッシュ無し新規起動 `cov=25%`）: `marble 728.43 / cloth 653.63 / fabric030 742.80 / sand 685.35 ms`（旧 `weights_tex` 時はキャッシュ済み等含む 5.87〜35.19 ms）。
+  - モバイル実機所見：重み配列 UBO 化により、Pixel 9a 実機（1280×720 全面 100%）では `Forward Mobile`（Vulkan 1.4）および `Compatibility`（GLES 3.2）ともに全4プロファイルで 60 FPS（`frame_ms` 16.62〜16.67 ms）に収まり、`quality8` の `uniform vec4 weights[498]` も GLES 3.2 で問題なく動作することを確認した（`Forward Mobile` の `quality` 100% 時のみ `Δgpu +9.95 ms` で目安 `+8.0 ms` を `+1.95 ms` 超過）。
 
 ### VRAM と使い分け（実装者所感を含む）
 
