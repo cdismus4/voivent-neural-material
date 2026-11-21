@@ -140,7 +140,20 @@ Forward Mobile（mobile）：ベースラインの GPU 時間は占有率 25%／
 
 - コールド状態での初回シェーダコンパイル（mobile 実測）は 522.6〜820.6 ms。WebGPU 側と同様、プリウォームの設計が要る。
 - quality／quality8 は占有率 50%→100% で GPU 時間が約 6.4〜6.7 ms で頭打ちに見える。これは Apple M4 の高負荷時の GPU 周波数ブースト（DVFS）の影響という計測者の推論であり、確定した原因ではない。
-- 対象は Apple M4 のみである。モバイル実機（スマートフォン等）での Godot 描画負荷は未実測。
+- 2026-11-21、Pixel 9a 実機（Android 17 / ARM Mali-G715）でも Godot 4.7.2 リリース APK（`1280×720`, 60Hz V-Sync 有効）で同一ベンチマークを実測した（全条件 `center_pixel_ok=true`）：
+  - **Forward Mobile（Vulkan 1.4）**（重み UBO 配列 `uniform vec4 weights[N]` 採用版、ベースライン `gpu_ms` `25% / 50% / 100% = 0.874 / 1.133 / 1.543 ms`, フレーム `16.63〜16.70 ms`。旧 `texelFetch(weights_tex)` 経路では `quality8` 100% が `72.21 ms` / 約 13.7 FPS だったものを、UBO 配列化で 2〜5.8 倍高速化して全4プロファイル 60 FPS を達成）:
+    - `standard (marble)`: `gpu_ms` `6.44 / 8.07 / 9.15 ms`（`Δ +5.57 / +6.94 / +7.60 ms`、`frame_ms` `16.70 / 16.64 / 16.65 ms`, 100% 目安 `+8.0 ms` 以下を達成）
+    - `quality (cloth)`: `gpu_ms` `7.58 / 8.32 / 11.49 ms`（`Δ +6.70 / +7.19 / +9.95 ms`、`frame_ms` `16.65 / 16.65 / 16.65 ms`、100% `Δgpu` 目安 `+8.0 ms` を `+1.95 ms` 超過するも実 FPS は 60 維持）
+    - `standard8 (fabric030)`: `gpu_ms` `7.14 / 8.21 / 9.59 ms`（`Δ +6.27 / +7.08 / +8.05 ms`、`frame_ms` `16.71 / 16.63 / 16.67 ms`, 100% 目安 `+14.0 ms` 以下を達成、旧 `29.79 ms` から大幅短縮）
+    - `quality8 (sand)`: `gpu_ms` `7.70 / 8.14 / 12.39 ms`（`Δ +6.82 / +7.01 / +10.85 ms`、`frame_ms` `16.68 / 16.62 / 16.67 ms`, 100% 目安 `+30.0 ms` 以下を達成、旧 `72.21 ms` から約 5.8 倍短縮）
+    - 初回コンパイル（キャッシュ無し新規起動 `cov=25%`）: `marble 770.49 / cloth 683.81 / fabric030 723.51 / sand 690.58 ms`（旧 `weights_tex` 初回 `marble 857.72 ms` と同オーダー）。
+  - **Compatibility（OpenGL ES 3.2）**（旧 `weights_tex` 経路での実測。Android GLES 3.2 ドライバ制約により `gpu_ms = 0.0000` 固定のため `frame_ms` 比較、ベースライン `16.54 / 16.63 / 16.61 ms`）:
+    - `standard (marble)`: `frame_ms` `16.63 / 16.65 / 26.63 ms`（`100% Δ +10.02 ms`、約 37.5 FPS）
+    - `quality (cloth)`: `frame_ms` `16.63 / 16.62 / 21.80 ms`（`100% Δ +5.19 ms`、約 45.9 FPS）
+    - `standard8 (fabric030)`: `frame_ms` `16.60 / 25.96 / 48.51 ms`（`50% Δ +9.33 ms`, `100% Δ +31.90 ms`）
+    - `quality8 (sand)`: `frame_ms` `23.16 / 43.52 / 85.31 ms`（`100% Δ +68.70 ms`、約 11.7 FPS）
+    - 初回コンパイル（`cov=25%`）: `5.87〜35.19 ms`（Vulkan 初回ほど大きなスパイクなし）。
+  - モバイル実機所見：Vulkan (`Forward Mobile`) では重み配列 UBO 化により Pixel 9a 全面 100% でも 4プロファイルすべて 60 FPS（`16.65〜16.67 ms`）で動作することを確認（`quality` 100% の `Δgpu +9.95 ms` のみ目標 `+8.0 ms` を `+1.95 ms` 超過）。なお `Compatibility`（GLES 3.2）上での `uniform vec4 weights[498]` 動作・性能は別途検証残件。
 
 ### VRAM と使い分け（実装者所感を含む）
 
@@ -170,7 +183,7 @@ Forward Mobile（mobile）：ベースラインの GPU 時間は占有率 25%／
 | アルファ（切り抜き） | 未対応。実アルファのある Base Color は入力段で理由つき拒否される。 |
 | Emissive／Height 等 | 未対応。標準セット外のファイル（displacement、emissive）は現状、無言で無視される（警告は出ない）。 |
 | 入力形式 | PNG のみ。JPEG／EXR は exit 2 で理由つき拒否。 |
-| 中間 mip・異方性 | 一部対応・既知の制約：TS ランタイムの復号は mip 0 の直評価のまま。一方 Godot ランタイム（`HARDWARE_BILINEAR`）は 2026-11-21 に潜在テクスチャのミップマップチェーン生成、非正方形対応の二軸最大比による潜在 LOD サンプリング（`enable_latent_lod`）、`2^lod` スケール済み clamp 余白、`tail.bin` への滑らかなクロスフェード（`enable_tail_crossfade`、既定 mip `3.0〜5.0`）、および `StandardMaterial3D` と同じ `render_mode diffuse_burley, specular_schlick_ggx`（粗面・斜め視線での Lambert 暗化解消）を実装し、遠景の縮小モアレと輝度乖離を緩和している（公開済みの現行アセットは `normalizedMip＝0` 固定で学習されており、形式と復号の定義自体は `normalizedMip` 入力を持つ）。また同日、学習側の対策として製品 CLI に opt-in のマルチミップ学習（`--mip-train`、実験バッチ5の案1）を追加した：教師ミップピラミッド（SPEC §5.3）で学習し、形式変更なしで ON の時だけ manifest に `mipMax: 6` を記録する。実測トレードオフ（バッチ5、3素材・同一レシピの対照比較）：遠景 mip の色 PSNR は +7.7〜+21.5 dB 改善する一方、レベル0は −1.0〜−2.2 dB 下がるため、既定は OFF のまま opt-in とした。OFF の学習でも学習後に遠景の崩れを測り、閾値を超えた素材にはレポートとコンソールへ `--mip-train` の使用推奨を助言として表示する（合否判定には影響しない）。なお `tail` 遷移部および異方性フィルタリング時の定量品質基準、ならびにモバイル実機でのコストは未測定のまま。 |
+| 中間 mip・異方性 | 一部対応・既知の制約：TS ランタイムの復号は mip 0 の直評価のまま。一方 Godot ランタイム（`HARDWARE_BILINEAR`）は 2026-11-21 に潜在テクスチャのミップマップチェーン生成、非正方形対応の二軸最大比による潜在 LOD サンプリング（`enable_latent_lod`）、`2^lod` スケール済み clamp 余白、`tail.bin` への滑らかなクロスフェード（`enable_tail_crossfade`、既定 mip `3.0〜5.0`）、および `StandardMaterial3D` と同じ `render_mode diffuse_burley, specular_schlick_ggx`（粗面・斜め視線での Lambert 暗化解消）を実装し、遠景の縮小モアレと輝度乖離を緩和している（公開済みの現行アセットは `normalizedMip＝0` 固定で学習されており、形式と復号の定義自体は `normalizedMip` 入力を持つ）。また同日、学習側の対策として製品 CLI に opt-in のマルチミップ学習（`--mip-train`、実験バッチ5の案1）を追加した：教師ミップピラミッド（SPEC §5.3）で学習し、形式変更なしで ON の時だけ manifest に `mipMax: 6` を記録する。実測トレードオフ（バッチ5、3素材・同一レシピの対照比較）：遠景 mip の色 PSNR は +7.7〜+21.5 dB 改善する一方、レベル0は −1.0〜−2.2 dB 下がるため、既定は OFF のまま opt-in とした。OFF の学習でも学習後に遠景の崩れを測り、閾値を超えた素材にはレポートとコンソールへ `--mip-train` の使用推奨を助言として表示する（合否判定には影響しない）。なお `tail` 遷移部・異方性フィルタリング時の定量品質基準や、斜め見下ろし地面における中景（`active_mip >= 5.0`）の `16×16 tail` 化に伴う解像感急落（等方 `max` 推定＋中間 mip 不在）は今後の課題として残る。モバイル実機での Godot コスト（Pixel 9a `Forward Mobile` における重み UBO 配列採用後）は §6 のとおり実測済み。 |
 | エンジン内での見え方 | 照明・角度・距離を変えた実描画での品質は未確認。本書の目視所見は平らなテクスチャ比較に基づく。 |
 | デスクトップでの全面敷き | quality8 を画面全面・高解像度で使うと +10.9 ms 級の追加コスト（§6）。 |
 | VRAM 常駐量 | quality 系は 1 素材 5.24〜10.49 MB が常駐する。多数常駐の用途では使い分けが要る（§6）。 |
