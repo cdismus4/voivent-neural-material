@@ -63,6 +63,10 @@ export interface WebGpuBindOptions {
     readonly mipMax?: number;
     /** Explicit constant normalizedMip in [0, 1] (overrides `mipMode`). */
     readonly normalizedMip?: number;
+    /** Enables WebGPU mipmapped latent LOD + >=mip4 anisotropic textureGrad + r_damp (default false). */
+    readonly enableLatentLod?: boolean;
+    /** Enables smooth tail crossfade across mip 3..5 when `enableLatentLod` is active and tail data exists. */
+    readonly enableTailCrossfade?: boolean;
 }
 
 export interface TailPreviewTextures {
@@ -355,14 +359,21 @@ export function bindResidentAssetToMeshes(
 
         const wrapU = asset.manifest.wrapU ?? 'repeat';
         const wrapV = asset.manifest.wrapV ?? 'repeat';
+        const enableLatentLod = options?.enableLatentLod === true;
+        const texOptions = enableLatentLod ? { generateMipmaps: true, anisotropy: 16 } : undefined;
         const allocatedTextures: Texture[] = [];
+        let tailCrossfadeTextures: TailPreviewTextures | null = null;
         try {
-            const fineSource = createLatentTextureSource(asset.level0.fine, asset.manifest.profile, wrapU, wrapV);
+            const fineSource = createLatentTextureSource(asset.level0.fine, asset.manifest.profile, wrapU, wrapV, texOptions);
             allocatedTextures.push(...toTextureArray(fineSource));
-            const coarseSource = createLatentTextureSource(asset.level0.coarse, asset.manifest.profile, wrapU, wrapV);
+            const coarseSource = createLatentTextureSource(asset.level0.coarse, asset.manifest.profile, wrapU, wrapV, texOptions);
             allocatedTextures.push(...toTextureArray(coarseSource));
             const weightsBuffer = createWeightsStorageBuffer(asset.weights.weights);
             const normMipNode = resolveNormalizedMipNode(asset, uvNode, options);
+
+            if (enableLatentLod && options?.enableTailCrossfade === true && asset.tail) {
+                tailCrossfadeTextures = createTailPreviewTextures(asset);
+            }
 
             const nodes: NeuralPbrNodes = createNeuralMaterialTslNodes(
                 fineSource,
@@ -373,8 +384,20 @@ export function bindResidentAssetToMeshes(
                     profile: asset.manifest.profile,
                     fineSize: level0Meta.fineSize,
                     coarseSize: level0Meta.coarseSize,
+                    sourceSize: asset.manifest.sourceSize,
                     wrapU,
                     wrapV,
+                    enableLatentLod,
+                    tailCrossfade: tailCrossfadeTextures
+                        ? {
+                              tailFirstMip: asset.manifest.tailFirstMip,
+                              baseColorTexture: tailCrossfadeTextures.baseColorTexture,
+                              normalTexture: tailCrossfadeTextures.normalTexture,
+                              ormTexture: tailCrossfadeTextures.ormTexture,
+                              width: tailCrossfadeTextures.width,
+                              height: tailCrossfadeTextures.height,
+                          }
+                        : undefined,
                 },
             );
 
@@ -388,11 +411,13 @@ export function bindResidentAssetToMeshes(
                 for (const tex of allocatedTextures) {
                     tex.dispose();
                 }
+                tailCrossfadeTextures?.dispose();
             };
         } catch (err) {
             for (const tex of allocatedTextures) {
                 tex.dispose();
             }
+            tailCrossfadeTextures?.dispose();
             throw err;
         }
     } else if (asset.tail) {

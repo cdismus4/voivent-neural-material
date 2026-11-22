@@ -3,13 +3,18 @@ import {
     dFdx,
     dFdy,
     dot,
+    exp2,
     float,
     fract,
+    greaterThanEqual,
     length,
     log2,
     max,
+    min,
+    mix,
     normalize,
     normalMap,
+    select,
     sqrt,
     storage,
     texture as textureNode,
@@ -21,6 +26,7 @@ import {
     ClampToEdgeWrapping,
     DataTexture,
     LinearFilter,
+    LinearMipmapLinearFilter,
     NoColorSpace,
     RepeatWrapping,
     RGBAFormat,
@@ -63,14 +69,33 @@ export interface MaterialBinding {
 
 export type LatentTextureSource = Texture | readonly [Texture, Texture];
 
+export interface LatentTextureBuildOptions {
+    readonly generateMipmaps?: boolean;
+    readonly anisotropy?: number;
+}
+
+export interface TslTailCrossfadeOptions {
+    readonly tailFirstMip: number;
+    readonly baseColorTexture: DataTexture;
+    readonly normalTexture: DataTexture;
+    readonly ormTexture: DataTexture;
+    readonly width: number;
+    readonly height: number;
+}
+
 export interface TslDecoderOptions {
     /** Target VNM1 profile; inferred from `weights.profile` when MlpWeights is passed, defaults to `'standard'` for raw StorageBufferAttribute. */
     readonly profile?: DecoderProfile;
     readonly fineSize: readonly [number, number];
     readonly coarseSize?: readonly [number, number];
+    readonly sourceSize?: readonly [number, number];
     readonly normalizedMip?: number;
     readonly wrapU?: 'repeat' | 'clamp';
     readonly wrapV?: 'repeat' | 'clamp';
+    /** Opt-in WebGPU anti-aliasing combo: mipmapped latent LOD + >=mip4 anisotropic textureGrad + r_damp. */
+    readonly enableLatentLod?: boolean;
+    /** Optional low-res tail crossfade across activeMipTw (mip 3..5) when `enableLatentLod` is active. */
+    readonly tailCrossfade?: TslTailCrossfadeOptions;
 }
 
 function buildRgba8DataTexture(
@@ -79,6 +104,7 @@ function buildRgba8DataTexture(
     height: number,
     wrapU: 'repeat' | 'clamp',
     wrapV: 'repeat' | 'clamp',
+    options?: LatentTextureBuildOptions,
 ): DataTexture {
     const texture = new DataTexture(
         buffer,
@@ -87,9 +113,13 @@ function buildRgba8DataTexture(
         RGBAFormat,
         UnsignedByteType,
     );
+    const useMipmaps = options?.generateMipmaps === true;
     texture.magFilter = LinearFilter;
-    texture.minFilter = LinearFilter;
-    texture.generateMipmaps = false;
+    texture.minFilter = useMipmaps ? LinearMipmapLinearFilter : LinearFilter;
+    texture.generateMipmaps = useMipmaps;
+    if (useMipmaps) {
+        texture.anisotropy = options?.anisotropy ?? 16;
+    }
     texture.colorSpace = NoColorSpace;
     texture.wrapS = wrapU === 'clamp' ? ClampToEdgeWrapping : RepeatWrapping;
     texture.wrapT = wrapV === 'clamp' ? ClampToEdgeWrapping : RepeatWrapping;
@@ -99,13 +129,15 @@ function buildRgba8DataTexture(
 
 /**
  * Creates an optimized RGBA8 DataTexture for 4-channel latent feature grids.
- * Enforces LinearFilter, NoColorSpace, no auto-mipmaps, and explicit wrap modes.
+ * Enforces LinearFilter, NoColorSpace, no auto-mipmaps, and explicit wrap modes by default
+ * (unless `options.generateMipmaps` is enabled for LOD filtering).
  * Strictly requires normalized u8 encoding in VNM1.
  */
 export function createLatentDataTexture(
     grid: LatentFeatureGrid,
     wrapU: 'repeat' | 'clamp' = 'repeat',
     wrapV: 'repeat' | 'clamp' = 'repeat',
+    options?: LatentTextureBuildOptions,
 ): DataTexture {
     validateU8LatentGrid(grid, 4);
     if (!grid.isNormalizedU8 || !(grid.data instanceof Uint8Array)) {
@@ -119,7 +151,7 @@ export function createLatentDataTexture(
     // Allocate dedicated Uint8Array buffer to prevent subview retention
     const buffer = new Uint8Array(expectedBytes);
     buffer.set(grid.data);
-    return buildRgba8DataTexture(buffer, grid.width, grid.height, wrapU, wrapV);
+    return buildRgba8DataTexture(buffer, grid.width, grid.height, wrapU, wrapV, options);
 }
 
 /**
@@ -130,6 +162,7 @@ export function createLatentDataTexturePair(
     grid: LatentFeatureGrid,
     wrapU: 'repeat' | 'clamp' = 'repeat',
     wrapV: 'repeat' | 'clamp' = 'repeat',
+    options?: LatentTextureBuildOptions,
 ): readonly [DataTexture, DataTexture] {
     validateU8LatentGrid(grid, 8);
     if (!grid.isNormalizedU8 || !(grid.data instanceof Uint8Array)) {
@@ -152,8 +185,8 @@ export function createLatentDataTexturePair(
         buf1[d + 3] = src[s + 7]!;
     }
     return [
-        buildRgba8DataTexture(buf0, grid.width, grid.height, wrapU, wrapV),
-        buildRgba8DataTexture(buf1, grid.width, grid.height, wrapU, wrapV),
+        buildRgba8DataTexture(buf0, grid.width, grid.height, wrapU, wrapV, options),
+        buildRgba8DataTexture(buf1, grid.width, grid.height, wrapU, wrapV, options),
     ];
 }
 
@@ -166,10 +199,11 @@ export function createLatentTextureSource(
     profile: DecoderProfile,
     wrapU: 'repeat' | 'clamp' = 'repeat',
     wrapV: 'repeat' | 'clamp' = 'repeat',
+    options?: LatentTextureBuildOptions,
 ): LatentTextureSource {
     const ch = getLatentChannelCount(profile);
-    if (ch === 4) return createLatentDataTexture(grid, wrapU, wrapV);
-    if (ch === 8) return createLatentDataTexturePair(grid, wrapU, wrapV);
+    if (ch === 4) return createLatentDataTexture(grid, wrapU, wrapV, options);
+    if (ch === 8) return createLatentDataTexturePair(grid, wrapU, wrapV, options);
     throw new Error(`Unsupported GPU latent channel count: ${ch} for profile '${profile}'`);
 }
 
@@ -242,11 +276,19 @@ function validateLatentTextureEntry(
     expectedWrapS: typeof RepeatWrapping | typeof ClampToEdgeWrapping,
     expectedWrapT: typeof RepeatWrapping | typeof ClampToEdgeWrapping,
     label: string,
+    allowMipmaps: boolean,
 ): void {
+    const validMinFilter = allowMipmaps
+        ? (texture.minFilter === LinearMipmapLinearFilter || texture.minFilter === LinearFilter)
+        : (texture.minFilter === LinearFilter && !texture.generateMipmaps && texture.mipmaps.length === 0);
     if (!(texture instanceof DataTexture) || texture.type !== UnsignedByteType || texture.format !== RGBAFormat ||
-        texture.minFilter !== LinearFilter || texture.magFilter !== LinearFilter || texture.colorSpace !== NoColorSpace ||
-        texture.generateMipmaps || texture.mipmaps.length > 0 || texture.flipY) {
-        throw new Error(`${label} must use unflipped linear-filtered RGBA u8 data without mipmaps`);
+        !validMinFilter || texture.magFilter !== LinearFilter || texture.colorSpace !== NoColorSpace ||
+        texture.flipY) {
+        throw new Error(
+            allowMipmaps
+                ? `${label} must use unflipped linear/mipmap-filtered RGBA u8 data`
+                : `${label} must use unflipped linear-filtered RGBA u8 data without mipmaps`,
+        );
     }
     const { data, width, height } = texture.image;
     if (!(data instanceof Uint8Array)) throw new Error(`${label} data must be Uint8Array`);
@@ -257,6 +299,28 @@ function validateLatentTextureEntry(
     if (texture.wrapS !== expectedWrapS || texture.wrapT !== expectedWrapT) {
         throw new Error(`${label} wrap mismatch: texture has wrapS=${texture.wrapS}, wrapT=${texture.wrapT}, expected ${expectedWrapS}, ${expectedWrapT}`);
     }
+}
+
+function sampleLatentWithLod(
+    tex: Texture,
+    uvNode: Vec2Node,
+    texSize: readonly [number, number],
+    wrapU: 'repeat' | 'clamp',
+    wrapV: 'repeat' | 'clamp',
+    lod: ScalarNode,
+    uvDx: Vec2Node,
+    uvDy: Vec2Node,
+    useGrad: Node<'bool'>,
+): Vec4Node {
+    const lodScale = exp2(max(lod, float(0.0)));
+    const mu = min(lodScale.mul(0.5).div(Math.max(texSize[0], 1)), float(0.5));
+    const mv = min(lodScale.mul(0.5).div(Math.max(texSize[1], 1)), float(0.5));
+    const hu = wrapU === 'repeat' ? uvNode.x : clamp(uvNode.x, mu, float(1.0).sub(mu));
+    const hv = wrapV === 'repeat' ? uvNode.y : clamp(uvNode.y, mv, float(1.0).sub(mv));
+    const uvSample = vec2(hu, hv);
+    const sGrad = textureNode(tex, uvSample).grad(uvDx, uvDy).mul(2.0).sub(1.0) as Vec4Node;
+    const sLod = textureNode(tex, uvSample, lod).mul(2.0).sub(1.0) as Vec4Node;
+    return select(useGrad, sGrad, sLod) as Vec4Node;
 }
 
 /**
@@ -341,8 +405,9 @@ export function createNeuralMaterialTslNodes(
     const expectedWrapS = wrapU === 'clamp' ? ClampToEdgeWrapping : RepeatWrapping;
     const expectedWrapT = wrapV === 'clamp' ? ClampToEdgeWrapping : RepeatWrapping;
 
-    fineTextures.forEach((tex, idx) => validateLatentTextureEntry(tex, options.fineSize, expectedWrapS, expectedWrapT, `fineTexture[${idx}]`));
-    coarseTextures.forEach((tex, idx) => validateLatentTextureEntry(tex, options.coarseSize, expectedWrapS, expectedWrapT, `coarseTexture[${idx}]`));
+    const enableLatentLod = options.enableLatentLod === true;
+    fineTextures.forEach((tex, idx) => validateLatentTextureEntry(tex, options.fineSize, expectedWrapS, expectedWrapT, `fineTexture[${idx}]`, enableLatentLod));
+    coarseTextures.forEach((tex, idx) => validateLatentTextureEntry(tex, options.coarseSize, expectedWrapS, expectedWrapT, `coarseTexture[${idx}]`, enableLatentLod));
 
     const mip = options.normalizedMip ?? 0;
     if (!Number.isFinite(mip) || mip < 0 || mip > 1) throw new Error('normalizedMip must be within [0, 1]');
@@ -352,20 +417,54 @@ export function createNeuralMaterialTslNodes(
 
     const uvNode = context.uv;
     const [fineW, fineH] = options.fineSize;
+    const coarseSize = options.coarseSize ?? options.fineSize;
+    const sourceSize = options.sourceSize ?? options.fineSize;
     const normMip = context.normalizedMip ?? float(mip);
 
-    // 1. Sample Fine & Coarse latent textures at LOD 0, then dequantize: f = 2 * sample - 1
-    const fineFeats = fineTextures.map((tex) => textureNode(tex, uvNode, float(0)).mul(2.0).sub(1.0) as Vec4Node);
-    const coarseFeats = coarseTextures.map((tex) => textureNode(tex, uvNode, float(0)).mul(2.0).sub(1.0) as Vec4Node);
+    // 1. Sample Fine & Coarse latent textures (LOD 0 in strict SPEC §7 mode, or mipmapped Method B Combo when enabled)
+    let fineFeats: Vec4Node[];
+    let coarseFeats: Vec4Node[];
+    let rDamp: ScalarNode | null = null;
+    let activeMipTwNode: ScalarNode | null = null;
+
+    if (enableLatentLod) {
+        const uvDx = context.uvDx ?? (dFdx(uvNode) as Vec2Node);
+        const uvDy = context.uvDy ?? (dFdy(uvNode) as Vec2Node);
+        const srcVec = vec2(sourceSize[0], sourceSize[1]);
+        const lenX = length(uvDx.mul(srcVec));
+        const lenY = length(uvDy.mul(srcVec));
+        const rho = max(lenX, lenY);
+        const rhoMin = min(lenX, lenY);
+        const activeMip = log2(max(rho, float(1.0)));
+        activeMipTwNode = log2(max(max(rhoMin, rho.mul(0.25)), float(1.0))) as ScalarNode;
+
+        const ratioF = Math.max(sourceSize[0] / Math.max(fineW, 1), sourceSize[1] / Math.max(fineH, 1));
+        const ratioC = Math.max(sourceSize[0] / Math.max(coarseSize[0], 1), sourceSize[1] / Math.max(coarseSize[1], 1));
+        const lodF = clamp(activeMip.sub(Math.log2(Math.max(ratioF, 1))), float(0.0), float(10.0)) as ScalarNode;
+        const lodC = clamp(activeMip.sub(Math.log2(Math.max(ratioC, 1))), float(0.0), float(10.0)) as ScalarNode;
+        rDamp = exp2(max(lodF, float(0.0)).mul(-1.0)) as ScalarNode;
+        const useGrad = greaterThanEqual(activeMip, float(4.0));
+
+        fineFeats = fineTextures.map((tex) =>
+            sampleLatentWithLod(tex, uvNode, options.fineSize, wrapU, wrapV, lodF, uvDx, uvDy, useGrad),
+        );
+        coarseFeats = coarseTextures.map((tex) =>
+            sampleLatentWithLod(tex, uvNode, coarseSize, wrapU, wrapV, lodC, uvDx, uvDy, useGrad),
+        );
+    } else {
+        fineFeats = fineTextures.map((tex) => textureNode(tex, uvNode, float(0)).mul(2.0).sub(1.0) as Vec4Node);
+        coarseFeats = coarseTextures.map((tex) => textureNode(tex, uvNode, float(0)).mul(2.0).sub(1.0) as Vec4Node);
+    }
 
     // 2. Local coordinates inside fine grid texel with explicit wrap alignment:
-    //    p = uvEffective * fineSize - 0.5; r = 2 * fract(p) - 1
+    //    p = uvEffective * fineSize - 0.5; r = (2 * fract(p) - 1) * rDamp
     const uWrapped = wrapU === 'repeat' ? fract(uvNode.x) : clamp(uvNode.x, float(0.0), float(1.0));
     const vWrapped = wrapV === 'repeat' ? fract(uvNode.y) : clamp(uvNode.y, float(0.0), float(1.0));
     const uvEffective = vec2(uWrapped, vWrapped);
 
     const p = uvEffective.mul(vec2(fineW, fineH)).sub(0.5);
-    const r = fract(p).mul(2.0).sub(1.0);
+    const rRaw = fract(p).mul(2.0).sub(1.0);
+    const r = rDamp ? rRaw.mul(rDamp) : rRaw;
 
     // 3. Pack input vec4s:
     //    4ch: [Fine0, Coarse0, (rx, ry, normMip, 1)] (3 vec4s = 12 floats)
@@ -399,7 +498,7 @@ export function createNeuralMaterialTslNodes(
     const raw1 = vec4(outputNodes[4]!, outputNodes[5]!, outputNodes[6]!, outputNodes[7]!) as Vec4Node;
 
     // 4. PBR channels derivation matching CpuReferenceDecoder
-    const baseColorLinear = clamp(
+    let baseColorLinear = clamp(
         vec3(outputNodes[0]!, outputNodes[1]!, outputNodes[2]!),
         float(0.0),
         float(1.0),
@@ -412,11 +511,39 @@ export function createNeuralMaterialTslNodes(
     const nx = nxRaw.mul(invScale);
     const ny = nyRaw.mul(invScale);
     const nz = sqrt(max(float(0.0), float(1.0).sub(xySq)));
-    const normalTangent = normalize(vec3(nx, ny, nz)) as Vec3Node;
+    let normalTangent = normalize(vec3(nx, ny, nz)) as Vec3Node;
 
-    const roughness = clamp(outputNodes[5]!, float(0.0), float(1.0)) as ScalarNode;
-    const metalness = clamp(outputNodes[6]!, float(0.0), float(1.0)) as ScalarNode;
-    const ao = clamp(outputNodes[7]!, float(0.0), float(1.0)) as ScalarNode;
+    let roughness = clamp(outputNodes[5]!, float(0.0), float(1.0)) as ScalarNode;
+    let metalness = clamp(outputNodes[6]!, float(0.0), float(1.0)) as ScalarNode;
+    let ao = clamp(outputNodes[7]!, float(0.0), float(1.0)) as ScalarNode;
+
+    if (options.tailCrossfade && activeMipTwNode) {
+        const tail = options.tailCrossfade;
+        let tw: ScalarNode;
+        if (tail.tailFirstMip <= 0) {
+            tw = float(1.0) as ScalarNode;
+        } else {
+            const hi = Math.min(tail.tailFirstMip, 5.0);
+            const lo = Math.min(3.0, hi);
+            const tRaw = clamp(activeMipTwNode.sub(lo).div(Math.max(hi - lo, 1e-4)), float(0.0), float(1.0));
+            tw = tRaw.mul(tRaw).mul(float(3.0).sub(tRaw.mul(2.0))) as ScalarNode;
+        }
+        const muTail = Math.min(0.5 / Math.max(tail.width, 1), 0.5);
+        const mvTail = Math.min(0.5 / Math.max(tail.height, 1), 0.5);
+        const uvTail = vec2(
+            wrapU === 'repeat' ? uvNode.x : clamp(uvNode.x, float(muTail), float(1.0 - muTail)),
+            wrapV === 'repeat' ? uvNode.y : clamp(uvNode.y, float(mvTail), float(1.0 - mvTail)),
+        );
+        const tailBase = textureNode(tail.baseColorTexture, uvTail, float(0));
+        const tailNorm = normalize(textureNode(tail.normalTexture, uvTail, float(0)).rgb.mul(2.0).sub(1.0));
+        const tailOrm = textureNode(tail.ormTexture, uvTail, float(0));
+
+        baseColorLinear = mix(baseColorLinear, tailBase.rgb, tw) as Vec3Node;
+        normalTangent = normalize(mix(normalTangent, tailNorm, tw)) as Vec3Node;
+        roughness = mix(roughness, tailOrm.x, tw) as ScalarNode;
+        metalness = mix(metalness, tailOrm.y, tw) as ScalarNode;
+        ao = mix(ao, tailOrm.z, tw) as ScalarNode;
+    }
 
     return {
         rawOutputs: [raw0, raw1],
